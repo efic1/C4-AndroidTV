@@ -7,7 +7,7 @@ set-top-box-style source. It also adds volume/mute key support, which the
 `tv` proxy class requires but the previous `cable` proxy class never
 exposed.
 
-Based on: `main`
+Based on: `patch-2`
 
 ## Background
 
@@ -18,6 +18,13 @@ can never itself be picked as the room's Display. For an all-in-one smart
 TV (the TV *is* the display, not a box plugged into one), this meant the
 driver could never appear as a Watch option, regardless of how the room was
 configured.
+
+`patch-2` was chosen as the base for this change (rather than `main`)
+because it already uses `<method>tlsv13</method>` for the pairing/command
+SSL connections. `main` still uses `<method>tlsv1</method>`, and TLS 1.0
+does not reliably complete a pairing handshake against modern Android TV /
+Google TV firmware. `patch-2` is also the branch this was actually tested
+against.
 
 ## What changed
 
@@ -50,6 +57,9 @@ configured.
   driver already exposes all its other key mappings.
 - Bumped `<version>`.
 - `OnlineCategory` changed from `media_player` to `tv`.
+- `patch-2`'s existing `tlsv13` SSL method, and its passthrough/mini-app
+  switcher logic (`PASSTHROUGH_PROXY`, `SWITCHER_PROXY`, the `SET_INPUT`
+  handling on proxy `5002`), are untouched by this change.
 
 ### `driver.lua`
 
@@ -59,26 +69,22 @@ configured.
   for every other key mapping in this driver. Without this, a `tv` proxy's
   volume slider/mute button in Navigator would do nothing, since the old
   `cable`-based driver never received these commands at all.
-- Bumped `DriverVersion`.
-
-## Known caveat
-
-This branch (`main`) uses `<method>tlsv1</method>` for the pairing/command
-SSL connections. TLS 1.0 does not reliably complete a pairing handshake
-against modern Android TV / Google TV firmware — the `patch-2` branch
-already fixes this by using `<method>tlsv13</method>` instead. If pairing
-fails on a recent TV with this build, that TLS version is the first thing
-to check; porting the same `tv`-proxy changes onto `patch-2` (which already
-has `tlsv13`) avoids the issue entirely.
+- Bumped `DriverVersion` (shows in Composer's "Driver Version" property —
+  useful for confirming a fresh build actually loaded after re-adding the
+  device).
+- All of `patch-2`'s existing logic (passthrough/switcher handling,
+  `RegisterRooms`, the extended device-descriptor fingerprint case) is
+  untouched.
 
 ## Testing notes
 
 - Verified `driver.xml` is well-formed XML and packages cleanly with
   Control4's official `dp3` driver packager.
-- **Not yet verified** against a live Composer Pro / Director instance —
-  the proxy reclassification is based on directly comparing this driver's
-  structure against a real Control4-certified TV driver's `driver.xml`,
-  but hasn't been confirmed end-to-end (Room video picker, Watch tile
-  behavior, volume slider) on real hardware yet. Removing and re-adding
-  the device (rather than updating an existing instance) is required for
-  the proxy class change to take effect.
+- Pairing confirmed working on this `patch-2` base (this is the branch
+  the reporting user's working setup was already running).
+- Room video/Watch-tile behavior after the proxy reclassification has
+  **not yet been confirmed end-to-end** on real hardware — the change is
+  based on directly comparing this driver's structure against a real
+  Control4-certified TV driver's `driver.xml`. Removing and re-adding the
+  device (rather than updating an existing instance) is required for the
+  proxy class change to take effect.
