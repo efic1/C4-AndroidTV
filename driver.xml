@@ -6,7 +6,7 @@
   <creator>Greg Moerler</creator>
   <created>08/01/2022 12:00 PM</created>
   <modified>08/07/2026 4:20 PM</modified>
-  <version>7</version>
+  <version>8</version>
   <control>lua_gen</control>
   <driver>DriverWorks</driver>
   <small image_source="c4z">icons/device_sm.png</small>
@@ -1057,7 +1057,7 @@
     <has_discrete_channel_select>True</has_discrete_channel_select>
     <has_discrete_input_select>False</has_discrete_input_select>
     <has_toad_input_select>False</has_toad_input_select>
-    <has_discrete_volume_control>True</has_discrete_volume_control>
+    <has_discrete_volume_control>False</has_discrete_volume_control>
     <has_up_down_volume_control>True</has_up_down_volume_control>
     <has_discrete_mute_control>False</has_discrete_mute_control>
     <has_toggle_mute_control>True</has_toggle_mute_control>
