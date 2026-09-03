@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.0.4"
+local DriverVersion = "1.2.0"
 EventID_CurrentAppChanged = 1
 
 EX_CMD		= {}
@@ -279,6 +279,12 @@ function ProcessInputCommand(CMD, tParams)
 		return ProcessInputCommandKey(tonumber(Properties["TV_VIDEO Mapping"]), CMD, tParams)
 	elseif (CMD == "CLOSED_CAPTIONED" or CMD == "START_CLOSED_CAPTIONED" or CMD == "PULSE_CLOSED_CAPTIONED" or CMD == "STOP_CLOSED_CAPTIONED" or CMD == "END_CLOSED_CAPTIONED") then
 		return ProcessInputCommandKey(tonumber(Properties["CLOSED_CAPTIONED Mapping"]), CMD, tParams)
+	elseif (CMD == "VOL_UP" or CMD == "START_VOL_UP" or CMD == "PULSE_VOL_UP" or CMD == "STOP_VOL_UP" or CMD == "END_VOL_UP") then
+		return ProcessInputCommandKey(tonumber(Properties["VOLUME UP Mapping"]), CMD, tParams)
+	elseif (CMD == "VOL_DOWN" or CMD == "START_VOL_DOWN" or CMD == "PULSE_VOL_DOWN" or CMD == "STOP_VOL_DOWN" or CMD == "END_VOL_DOWN") then
+		return ProcessInputCommandKey(tonumber(Properties["VOLUME DOWN Mapping"]), CMD, tParams)
+	elseif (CMD == "MUTE" or CMD == "MUTE_TOGGLE" or CMD == "START_MUTE" or CMD == "PULSE_MUTE" or CMD == "STOP_MUTE" or CMD == "END_MUTE") then
+		return ProcessInputCommandKey(tonumber(Properties["MUTE Mapping"]), CMD, tParams)
 	
 	elseif (CMD == "CUSTOM_1" or CMD == "START_CUSTOM_1" or CMD == "PULSE_CUSTOM_1" or CMD == "STOP_CUSTOM_1" or CMD == "END_CUSTOM_1") then
 		return ProcessInputCommandKey(tonumber(Properties["CUSTOM_1 Mapping"]), CMD, tParams)
