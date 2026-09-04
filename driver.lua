@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.2.0-p2"
+local DriverVersion = "1.2.2-p2"
 EventID_CurrentAppChanged = 1
 
 EX_CMD		= {}
@@ -180,11 +180,17 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 
 	if (BindingID == 5001) then
 		if (strCommand == "ON") then
-			if (Properties["Send WOL on ON"] == "True") then
-				SendMagicPacket()
-			end
 			if (Properties["Power Status"] == "OFF") then
-				SendKey(tonumber(Properties["POWER Mapping"]))
+				if (Properties["Send WOL on ON"] == "True") then
+					SendMagicPacket()
+					C4:SetTimer(8000, function(timer)
+						if (Properties["Power Status"] == "OFF") then
+							SendKey(tonumber(Properties["POWER Mapping"]))
+						end
+					end)
+				else
+					SendKey(tonumber(Properties["POWER Mapping"]))
+				end
 			end
 			
 		elseif (strCommand == "OFF") then
