@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.2.2-p2"
+local DriverVersion = "1.3.2-p2"
 EventID_CurrentAppChanged = 1
 
 EX_CMD		= {}
@@ -183,11 +183,8 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 			if (Properties["Power Status"] == "OFF") then
 				if (Properties["Send WOL on ON"] == "True") then
 					SendMagicPacket()
-					C4:SetTimer(8000, function(timer)
-						if (Properties["Power Status"] == "OFF") then
-							SendKey(tonumber(Properties["POWER Mapping"]))
-						end
-					end)
+					WOLRetryCount = 0
+					C4:SetTimer(3000, TryConnectAfterWOL)
 				else
 					SendKey(tonumber(Properties["POWER Mapping"]))
 				end
@@ -507,6 +504,31 @@ end
 PingRequestCount = 0
 PingTimerID = 0
 
+WOLRetryCount = 0
+MAX_WOL_RETRIES = 15 -- 15 x 3s = up to 45s waiting for the TV to wake and start listening
+
+function TryConnectAfterWOL()
+	if (Properties["Connection"] == "ONLINE") then
+		if (Properties["Power Status"] == "ON") then
+			Debug("TV already reports itself ON after WOL, skipping power key (it's a toggle, not a discrete ON)")
+			WOLRetryCount = 0
+		else
+			Debug("TV came back online after WOL, sending power key")
+			WOLRetryCount = 0
+			SendKey(tonumber(Properties["POWER Mapping"]))
+		end
+	elseif (WOLRetryCount < MAX_WOL_RETRIES) then
+		WOLRetryCount = WOLRetryCount + 1
+		Debug("Still waiting for TV to wake up after WOL, retry " .. WOLRetryCount .. "/" .. MAX_WOL_RETRIES .. "...")
+		LUA_ACTION.DisconnectFromCommand(nil)
+		LUA_ACTION.ConnectToCommand(nil)
+		C4:SetTimer(3000, TryConnectAfterWOL)
+	else
+		Debug("TV never came back online after WOL, giving up")
+		WOLRetryCount = 0
+	end
+end
+
 function StartPingTimer()	
 	if (PingTimerID ~= 0) then
 		PingTimerID = C4:KillTimer(PingTimerID)
@@ -687,6 +709,7 @@ end
 function LUA_ACTION.DisconnectFromCommand(tQueryParams)
 	Debug("Disconnecting From Command Interface...")
 	C4:NetDisconnect(6001, 6466)
+	MessageBuffer = ""
 end
 
 
