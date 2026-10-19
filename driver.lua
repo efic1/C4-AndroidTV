@@ -4,7 +4,10 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p2"
+local DriverVersion = "1.3.2-p3"
+-- Declared up here so every function below (including OnConnectionStatusChanged) shares
+-- the same upvalue instead of silently writing to a global.
+local MessageBuffer = ""
 EventID_CurrentAppChanged = 1
 
 EX_CMD		= {}
@@ -180,13 +183,18 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 
 	if (BindingID == 5001) then
 		if (strCommand == "ON") then
-			if (Properties["Power Status"] == "OFF") then
+			-- "?" means no status has been received yet; only treat it as OFF while not connected,
+			-- because the power key is a toggle and would switch a TV that is actually ON off.
+			local Status = Properties["Power Status"]
+			if (Status == "OFF" or (Status == "?" and not IsConnected())) then
 				if (Properties["Send WOL on ON"] == "True") then
 					SendMagicPacket()
 					WOLRetryCount = 0
 					C4:SetTimer(3000, TryConnectAfterWOL)
-				else
+				elseif (IsConnected()) then
 					SendKey(tonumber(Properties["POWER Mapping"]))
+				else
+					Debug("TV is OFFLINE and 'Send WOL on ON' is disabled, cannot power on")
 				end
 			end
 			
@@ -470,23 +478,71 @@ end
 
 
 
+-- Reconnect with backoff. The 6466 port is configured with auto_connect / keep_connection
+-- off in driver.xml, so without this the only recovery path was the 60s ping watchdog.
+RECONNECT_MIN_DELAY = 5		-- seconds
+RECONNECT_MAX_DELAY = 60	-- seconds
+local ReconnectDelay = RECONNECT_MIN_DELAY
+local ReconnectTimer = nil
+
+function IsConnected()
+	return Properties["Connection"] == "ONLINE"
+end
+
+local function CancelReconnect()
+	if (ReconnectTimer ~= nil) then
+		C4:KillTimer(ReconnectTimer)
+		ReconnectTimer = nil
+	end
+end
+
+local function ScheduleReconnect()
+	if (ReconnectTimer ~= nil) then return end -- already pending
+	if (string.len(Properties["Device Public Key Modulus"]) == 0) then return end -- not paired yet
+
+	Debug("Reconnecting in " .. ReconnectDelay .. "s...")
+	ReconnectTimer = C4:SetTimer(ReconnectDelay * 1000, function(timer)
+		ReconnectTimer = nil
+		if (not IsConnected()) then
+			ReconnectDelay = math.min(ReconnectDelay * 2, RECONNECT_MAX_DELAY)
+			Debug("Reconnect attempt...")
+			C4:NetConnect(6001, 6466)
+			ScheduleReconnect() -- keep trying until OnConnectionStatusChanged reports ONLINE
+		end
+	end)
+end
+
 function OnConnectionStatusChanged(BindingID, nPort, strStatus)
 	print("Connection Status Changed: " .. strStatus)
 	if (strStatus == "ONLINE") then
 		if(nPort == 6467) then
 			Pairing_SendRequest()
 		end
-		
+
 		local MAC = C4:GetDeviceMAC(6001)
 		C4:UpdateProperty("MAC Address", MAC)
 	end
 	if(nPort == 6466) then
-			C4:UpdateProperty("Connection", strStatus)
+		C4:UpdateProperty("Connection", strStatus)
+
+		-- Any status change means the old stream is gone: drop partial frames and ping state
+		-- so they can't corrupt parsing of the next session.
+		MessageBuffer = ""
+		PingRequestCount = 0
+
+		if (strStatus == "ONLINE") then
+			CancelReconnect()
+			ReconnectDelay = RECONNECT_MIN_DELAY
+		else
+			-- No DEVICE STATUS message arrives when the TV vanishes, so "Power Status" would stay
+			-- "ON" forever and the next ON command would be ignored (no WOL, no power key).
+			C4:UpdateProperty("Power Status", "OFF")
+			ScheduleReconnect()
+		end
 	end
 end
 
 
-local MessageBuffer = ""
 function ReceivedFromNetwork(BindingID, nPort, strData)
 	MessageBuffer = MessageBuffer .. strData
 	local MessageSize = MessageBuffer:byte(1)
@@ -649,6 +705,10 @@ function SendKey_RELEASE(KeyCode)						SendKeyType(KeyCode, KEY_RELEASE)								
 function SendKey_PRESS_AND_RELEASE(KeyCode)	SendKey_PRESS(KeyCode)	SendKey_RELEASE(KeyCode)	end
 
 function SendKeyType(KeyCode, SendType)
+	if (not IsConnected()) then
+		Debug("TV OFFLINE, dropping key " .. KeyCode .. " (" .. SendType .. ")")
+		return
+	end
 	Debug("Sending " .. KeyCode .. " (" .. SendType .. ")")
 	SendWireCommand({
 									[10]={
@@ -659,6 +719,10 @@ function SendKeyType(KeyCode, SendType)
 end
 
 function SendURL(URL)
+	if (not IsConnected()) then
+		Debug("TV OFFLINE, dropping URL (" .. URL .. ")")
+		return
+	end
 	Debug("Sending URL (" .. URL .. ")")
 	SendWireCommand({
 									[90]={[1]={ID=1, WireType=WireType_String, Value=URL}}
