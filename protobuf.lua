@@ -134,6 +134,15 @@ end
 
 
 
+-- DecodeWire guesses whether a string field is a nested message and tries to decode it; that guess
+-- fails on ordinary strings (app names, ...) and is not an error. Only report problems at the top
+-- level, where they mean a message really could not be decoded.
+function DecodeNote(Text, Level)
+	if ((Level or 1) <= 1) then
+		DebugLevel(Text, Level or 1)
+	end
+end
+
 function DecodeWire(Data, Level)
 	local CurrentPosition = 1
 	local BytesRemaining = 0
@@ -162,7 +171,7 @@ function DecodeWire(Data, Level)
 			BytesRemaining = #Data - CurrentPosition  --DebugLevel("Bytes Remaining=" .. BytesRemaining, Level)
 			
 		elseif(WireType == WireType_Fixed64) then 		--Fixed64				8 Bytes (Little Endian)			fixed64, sfixed64, double
-			DebugLevel("UNSUPPORTED FIXED64 WIRE TYPE", Level)
+			DecodeNote("UNSUPPORTED FIXED64 WIRE TYPE", Level)
 			--CurrentPosition = CurrentPosition + 8
 		elseif(WireType == WireType_String) then 		--IdeLim				var len + (len * bytes)			string, bytes, (inner) messages
 			local StringLength = DecodeVarInt(Data, CurrentPosition)
@@ -197,16 +206,16 @@ function DecodeWire(Data, Level)
 			CurrentPosition = CurrentPosition + StringLength.Value
 
 		elseif(WireType == WireType_OpenGroup) then 		--StartGroup		N/A													N/A
-			DebugLevel("UNSUPPORTED START_GROUP WIRE TYPE", Level)
+			DecodeNote("UNSUPPORTED START_GROUP WIRE TYPE", Level)
 
 		elseif(WireType == WireType_CloseGroup) then 		--EndGroup			N/A													N/A
-			DebugLevel("UNSUPPORTED END_GROUP WIRE TYPE", Level)
+			DecodeNote("UNSUPPORTED END_GROUP WIRE TYPE", Level)
 
 		elseif(WireType == WireType_Fixed32) then 		--Fixed32				4 Bytes (Little Endian)			fixed32, sfixed32, float
-			DebugLevel("UNSUPPORTED FIXED32 WIRE TYPE", Level)
+			DecodeNote("UNSUPPORTED FIXED32 WIRE TYPE", Level)
 			--CurrentPosition = CurrentPosition + 4
 		else
-			DebugLevel("UNKNOWN WIRE TYPE", Level)
+			DecodeNote("UNKNOWN WIRE TYPE", Level)
 			return {}
 		end
 	end
