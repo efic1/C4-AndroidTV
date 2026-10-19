@@ -571,15 +571,29 @@ function OnConnectionStatusChanged(BindingID, nPort, strStatus)
 end
 
 
+MAX_MESSAGE_SIZE = 65536
+
 function ReceivedFromNetwork(BindingID, nPort, strData)
+	if (strData == nil or #strData == 0) then return end
 	MessageBuffer = MessageBuffer .. strData
-	local MessageSize = MessageBuffer:byte(1)
-	
-	if(#MessageBuffer > MessageSize) then -- Check Buffer For Completed Message
-		local Message = MessageBuffer:sub(2, MessageSize+1)
-		ProcessNetworkMessage(Message)
-	
-		MessageBuffer = MessageBuffer:sub(MessageSize+2)
+
+	-- One packet can hold several messages, or only part of one: process every complete message.
+	while (#MessageBuffer > 0) do
+		local Length, HeaderBytes = ReadLengthPrefix(MessageBuffer)
+		if (Length == nil) then break end -- length prefix not complete yet
+		if (Length == false or Length > MAX_MESSAGE_SIZE) then
+			print("Invalid message length prefix, discarding receive buffer")
+			MessageBuffer = ""
+			break
+		end
+		if (#MessageBuffer < HeaderBytes + Length) then break end -- wait for the rest of the message
+
+		local Message = MessageBuffer:sub(HeaderBytes + 1, HeaderBytes + Length)
+		MessageBuffer = MessageBuffer:sub(HeaderBytes + Length + 1)
+
+		-- A malformed message must not abort the loop (and lose the messages behind it).
+		local ok, err = pcall(ProcessNetworkMessage, Message)
+		if (not ok) then print("Error processing network message: " .. tostring(err)) end
 	end
 end
 
@@ -750,8 +764,7 @@ function SendCommandWithSize(Payload)
 		DebugHeader("Sending Command (" .. #Payload .. ") HEX: " .. GetHexString(Payload))
 		DebugWireMessage(WireMessage)
 	end
-	C4:SendToNetwork(6001, 6466, string.char(#Payload));
-	C4:SendToNetwork(6001, 6466, Payload);
+	C4:SendToNetwork(6001, 6466, FrameMessage(Payload))
 end
 
 
