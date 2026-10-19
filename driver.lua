@@ -213,10 +213,9 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 			if (Status == "OFF" or (Status == "?" and not IsConnected())) then
 				if (Properties["Send WOL on ON"] == "True") then
 					SendMagicPacket()
-					WOLRetryCount = 0
-					C4:SetTimer(3000, TryConnectAfterWOL)
+					StartPowerOnSequence(false)
 				elseif (IsConnected()) then
-					SendKey(tonumber(Properties["POWER Mapping"]))
+					StartPowerOnSequence(true)
 				else
 					Debug("TV is OFFLINE and 'Send WOL on ON' is disabled, cannot power on")
 				end
@@ -557,6 +556,7 @@ function OnConnectionStatusChanged(BindingID, nPort, strStatus)
 		-- so they can't corrupt parsing of the next session.
 		MessageBuffer = ""
 		PingRequestCount = 0
+		PowerStatusKnown = false -- the TV re-announces its power state on every new connection
 
 		if (strStatus == "ONLINE") then
 			CancelReconnect()
@@ -590,26 +590,55 @@ PingTimerID = 0
 
 WOLRetryCount = 0
 MAX_WOL_RETRIES = 15 -- 15 x 3s = up to 45s waiting for the TV to wake and start listening
+MAX_STATUS_WAITS = 5 -- 5 x 1s waiting for the TV to announce its power state after (re)connecting
 
-function TryConnectAfterWOL()
-	if (Properties["Connection"] == "ONLINE") then
-		if (Properties["Power Status"] == "ON") then
-			Debug("TV already reports itself ON after WOL, skipping power key (it's a toggle, not a discrete ON)")
-			WOLRetryCount = 0
+PowerOnTimer = nil			-- pending power-on step; only ONE sequence may run at a time
+PowerOnStatusWaits = 0
+PowerStatusKnown = false	-- true once the TV has reported its power state on the current connection
+
+-- The power key is a toggle, so two overlapping sequences (or a key sent before we know the TV's
+-- real state) can switch a TV that is already on back off. Hence: one sequence at a time, and
+-- the key is only sent once the TV has told us it is off.
+function StartPowerOnSequence(Immediate)
+	if (PowerOnTimer ~= nil) then
+		Debug("Power on already in progress, not starting another sequence")
+		return
+	end
+	WOLRetryCount = 0
+	PowerOnStatusWaits = 0
+	if (Immediate) then
+		TryPowerOn()
+	else
+		PowerOnTimer = C4:SetTimer(3000, TryPowerOn)
+	end
+end
+
+function TryPowerOn()
+	PowerOnTimer = nil
+	if (IsConnected()) then
+		if (not PowerStatusKnown and PowerOnStatusWaits < MAX_STATUS_WAITS) then
+			PowerOnStatusWaits = PowerOnStatusWaits + 1
+			Debug("Connected, waiting for the TV's power status " .. PowerOnStatusWaits .. "/" .. MAX_STATUS_WAITS .. "...")
+			PowerOnTimer = C4:SetTimer(1000, TryPowerOn)
+		elseif (Properties["Power Status"] == "ON") then
+			Debug("TV already reports itself ON, skipping power key (it's a toggle, not a discrete ON)")
 		else
-			Debug("TV came back online after WOL, sending power key")
-			WOLRetryCount = 0
+			if (not PowerStatusKnown) then
+				Debug("TV never reported its power status, sending power key anyway")
+			end
+			Debug("TV is online and OFF, sending power key")
 			SendKey(tonumber(Properties["POWER Mapping"]))
 		end
+	elseif (Properties["Send WOL on ON"] ~= "True") then
+		Debug("TV went offline before power on completed and WOL is disabled, giving up")
 	elseif (WOLRetryCount < MAX_WOL_RETRIES) then
 		WOLRetryCount = WOLRetryCount + 1
 		Debug("Still waiting for TV to wake up after WOL, retry " .. WOLRetryCount .. "/" .. MAX_WOL_RETRIES .. "...")
 		LUA_ACTION.DisconnectFromCommand(nil)
 		LUA_ACTION.ConnectToCommand(nil)
-		C4:SetTimer(3000, TryConnectAfterWOL)
+		PowerOnTimer = C4:SetTimer(3000, TryPowerOn)
 	else
 		Debug("TV never came back online after WOL, giving up")
-		WOLRetryCount = 0
 	end
 end
 
@@ -676,6 +705,7 @@ function ProcessNetworkMessage(Message)
 		
 	elseif(FingerPrint == "[F40][F1][WT0]") then
 		Debug("DEVICE STATUS")
+		PowerStatusKnown = true
 		if(WireMessage[40][1].Value == 1) then
 			C4:UpdateProperty("Power Status", "ON")
 		else
