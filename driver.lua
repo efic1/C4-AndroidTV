@@ -196,7 +196,7 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 	if (tParams ~= nil) then	Debug(tParams)	end
 	if(Properties["Connection"] == "OFFLINE") then
 			Debug("Connection OFFLINE, Attempting To Connect...")
-			LUA_ACTION.ConnectToCommand(nil)
+			ConnectIfIdle()
 	end
 
 	if (BindingID == SWITCHER_PROXY and strCommand == 'PASSTHROUGH') then
@@ -512,8 +512,26 @@ RECONNECT_MAX_DELAY = 60	-- seconds
 local ReconnectDelay = RECONNECT_MIN_DELAY
 local ReconnectTimer = nil
 
+CONNECT_MIN_SPACING = 2		-- seconds between connection attempts started by bursty callers
+local LastConnectAttempt = 0
+
+function GetTimeSeconds()
+	return os.time()
+end
+
 function IsConnected()
 	return Properties["Connection"] == "ONLINE"
+end
+
+-- Remote commands arrive in bursts (a held volume button sends many), and each one used to start
+-- a fresh TLS connection attempt while the TV was offline. Skip the attempt if one was just made.
+function ConnectIfIdle()
+	if (GetTimeSeconds() - LastConnectAttempt < CONNECT_MIN_SPACING) then
+		Debug("Connect attempt skipped, one was just made")
+		return false
+	end
+	LUA_ACTION.ConnectToCommand(nil)
+	return true
 end
 
 local function CancelReconnect()
@@ -533,10 +551,21 @@ local function ScheduleReconnect()
 		if (not IsConnected()) then
 			ReconnectDelay = math.min(ReconnectDelay * 2, RECONNECT_MAX_DELAY)
 			Debug("Reconnect attempt...")
-			C4:NetConnect(6001, 6466)
+			ConnectIfIdle()
 			ScheduleReconnect() -- keep trying until OnConnectionStatusChanged reports ONLINE
 		end
 	end)
+end
+
+-- Data arriving on 6466 proves the connection is up, even if its ONLINE status event was missed
+-- or arrived before the OFFLINE event of the previous socket. Without this the property would
+-- stay OFFLINE and every command would be dropped until the next status event.
+function MarkOnlineFromData()
+	if (IsConnected()) then return end
+	Debug("Data received while marked OFFLINE, marking ONLINE")
+	C4:UpdateProperty("Connection", "ONLINE")
+	CancelReconnect()
+	ReconnectDelay = RECONNECT_MIN_DELAY
 end
 
 function OnConnectionStatusChanged(BindingID, nPort, strStatus)
@@ -575,6 +604,7 @@ MAX_MESSAGE_SIZE = 65536
 
 function ReceivedFromNetwork(BindingID, nPort, strData)
 	if (strData == nil or #strData == 0) then return end
+	if (nPort == 6466) then MarkOnlineFromData() end
 	MessageBuffer = MessageBuffer .. strData
 
 	-- One packet can hold several messages, or only part of one: process every complete message.
@@ -837,8 +867,12 @@ end
 
 function LUA_ACTION.ConnectToCommand(tQueryParams)
 	Debug("Connecting To Command Interface...")
+	LastConnectAttempt = GetTimeSeconds()
 	C4:NetConnect(6001, 6466)
 	StartPingTimer()
+	-- A failed attempt may not produce an OFFLINE status event, so make sure the backoff retry
+	-- is armed from here too (it is a no-op when already pending or when the driver is unpaired).
+	ScheduleReconnect()
 end
 
 function LUA_ACTION.DisconnectFromCommand(tQueryParams)
