@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p5"
+local DriverVersion = "1.3.2-p6"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
@@ -510,7 +510,8 @@ end
 RECONNECT_MIN_DELAY = 5		-- seconds
 RECONNECT_MAX_DELAY = 60	-- seconds
 local ReconnectDelay = RECONNECT_MIN_DELAY
-local ReconnectTimer = nil
+local ReconnectPending = false
+local ReconnectGeneration = 0
 
 CONNECT_MIN_SPACING = 2		-- seconds between connection attempts started by bursty callers
 local LastConnectAttempt = 0
@@ -555,20 +556,25 @@ function ConnectIfIdle()
 	return true
 end
 
+-- The pending retry is cancelled by invalidating it, not by killing the timer: on the controller
+-- C4:SetTimer returns a timer object, not the numeric ID C4:KillTimer expects, and passing it
+-- raised "idTimer should be a number" in OnConnectionStatusChanged on every ONLINE event. A
+-- cancelled timer still fires, sees a stale generation and does nothing.
 local function CancelReconnect()
-	if (ReconnectTimer ~= nil) then
-		C4:KillTimer(ReconnectTimer)
-		ReconnectTimer = nil
-	end
+	ReconnectGeneration = ReconnectGeneration + 1
+	ReconnectPending = false
 end
 
 local function ScheduleReconnect()
-	if (ReconnectTimer ~= nil) then return end -- already pending
+	if (ReconnectPending) then return end -- already pending
 	if (string.len(Properties["Device Public Key Modulus"]) == 0) then return end -- not paired yet
 
+	ReconnectPending = true
+	local Generation = ReconnectGeneration
 	Debug("Reconnecting in " .. ReconnectDelay .. "s...")
-	ReconnectTimer = C4:SetTimer(ReconnectDelay * 1000, function(timer)
-		ReconnectTimer = nil
+	C4:SetTimer(ReconnectDelay * 1000, function(timer)
+		if (Generation ~= ReconnectGeneration) then return end -- cancelled while waiting
+		ReconnectPending = false
 		if (not IsConnected()) then
 			ReconnectDelay = math.min(ReconnectDelay * 2, RECONNECT_MAX_DELAY)
 			Debug("Reconnect attempt...")
