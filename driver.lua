@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p4"
+local DriverVersion = "1.3.2-p5"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
@@ -523,6 +523,27 @@ function IsConnected()
 	return Properties["Connection"] == "ONLINE"
 end
 
+RECONNECT_SETTLE_MS = 1500	-- time to let the old socket close before opening a new one
+local ConnectSettleTimer = nil
+
+-- Reset the connection the way a manual "Disconnect" followed, a moment later, by "Connect" does.
+-- Issuing NetDisconnect and NetConnect in the same instant (what the watchdog and the WOL retry
+-- did) does not recover the connection, and neither does a NetConnect on a socket that was never
+-- reset (what the backoff timer did): the manual sequence was the only thing that worked.
+function RestartConnection()
+	if (ConnectSettleTimer ~= nil) then
+		Debug("Connection restart already in progress")
+		return
+	end
+	Debug("Resetting connection, reconnecting in " .. RECONNECT_SETTLE_MS .. "ms...")
+	LastConnectAttempt = GetTimeSeconds()
+	LUA_ACTION.DisconnectFromCommand(nil)
+	ConnectSettleTimer = C4:SetTimer(RECONNECT_SETTLE_MS, function(timer)
+		ConnectSettleTimer = nil
+		LUA_ACTION.ConnectToCommand(nil)
+	end)
+end
+
 -- Remote commands arrive in bursts (a held volume button sends many), and each one used to start
 -- a fresh TLS connection attempt while the TV was offline. Skip the attempt if one was just made.
 function ConnectIfIdle()
@@ -530,7 +551,7 @@ function ConnectIfIdle()
 		Debug("Connect attempt skipped, one was just made")
 		return false
 	end
-	LUA_ACTION.ConnectToCommand(nil)
+	RestartConnection()
 	return true
 end
 
@@ -678,8 +699,7 @@ function TryPowerOn()
 	elseif (WOLRetryCount < MAX_WOL_RETRIES) then
 		WOLRetryCount = WOLRetryCount + 1
 		Debug("Still waiting for TV to wake up after WOL, retry " .. WOLRetryCount .. "/" .. MAX_WOL_RETRIES .. "...")
-		LUA_ACTION.DisconnectFromCommand(nil)
-		LUA_ACTION.ConnectToCommand(nil)
+		RestartConnection()
 		PowerOnTimer = C4:SetTimer(3000, TryPowerOn)
 	else
 		Debug("TV never came back online after WOL, giving up")
@@ -697,8 +717,7 @@ function ExecutePingTimer()
 	--Debug("Ping Request Count: " .. PingRequestCount)
 	if(string.len(Properties["Device Public Key Modulus"]) > 0 and PingRequestCount == 0) then
 		Debug("Communication Failed, attempting to connect...")
-		LUA_ACTION.DisconnectFromCommand(nil)
-		LUA_ACTION.ConnectToCommand(nil)
+		RestartConnection()
 	end
 	
 	PingRequestCount = 0
