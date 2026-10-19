@@ -149,22 +149,46 @@ function OnWatchedVariableChanged(DeviceID, VariableID, strValue)
 	DebugDivider("-")
 	
 	local SwitchedToDeviceID = tonumber(strValue)
-	
-	if(VariableID == 1000) then		
-			if(SwitchedToDeviceID == C4:GetDeviceID() or SwitchedToDeviceID == C4:GetProxyDevices()) then
-				Debug("Switched To Android TV Device, DO NOTHING")
+
+	if(VariableID == 1000) then
+		-- We listen to variable 1000 (selected device) of EVERY room, so this fires for changes
+		-- in rooms that have nothing to do with this TV. Only react when this TV was the selected
+		-- device in the room that changed and something else has been selected now.
+		RoomIDSources = RoomIDSources or {}
+		local RoomID = tonumber(DeviceID)
+		local PreviousDeviceID = RoomIDSources[RoomID] or 0
+		local NewDeviceID = SwitchedToDeviceID or 0
+		RoomIDSources[RoomID] = NewDeviceID
+
+		local Own = GetOwnDeviceIDs()
+		if (Own[NewDeviceID]) then
+			Debug("Switched To Android TV Device, DO NOTHING")
+		elseif (not Own[PreviousDeviceID]) then
+			Debug("Room " .. tostring(RoomID) .. " changed source but Android TV was not selected there, DO NOTHING")
+		else
+			if (Properties["On Room OFF"] == "Pause") then
+				Debug("Switched AWAY from Android TV Device, PAUSE")
+				SendKey(tonumber(Properties["PAUSE_ROOM_OFF Mapping"]))
 			else
-				if (Properties["On Room OFF"] == "Pause") then
-					Debug("Switched AWAY from Android TV Device, PAUSE")
-					SendKey(tonumber(Properties["PAUSE_ROOM_OFF Mapping"]))
-				else
-					Debug("Switched AWAY from Android TV Device, PAUSE NOT ENABLED, DO NOTHING")
-				end
-				
+				Debug("Switched AWAY from Android TV Device, PAUSE NOT ENABLED, DO NOTHING")
 			end
+		end
 	end
-	
-end 
+
+end
+
+-- Device IDs that a room's "selected device" variable holds when this TV is selected:
+-- the driver itself and the proxies bound to it.
+function GetOwnDeviceIDs()
+	local ids = {}
+	local DriverID = C4:GetDeviceID()
+	ids[DriverID] = true
+	for _, Binding in ipairs({5001, 5002}) do
+		local ProxyID = next(C4:GetBoundConsumerDevices(DriverID, Binding) or {})
+		if (ProxyID ~= nil) then ids[ProxyID] = true end
+	end
+	return ids
+end
 
 
 function ReceivedFromProxy(BindingID, strCommand, tParams)
