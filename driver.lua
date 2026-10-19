@@ -310,9 +310,13 @@ function HideProxyInAllRooms (BindingID)
 	if (BindingID == 0) then return end -- silently fail if no binding passed in
 
 	-- Get Bound Proxy's Device ID / Name.
-	local id, name = next (C4:GetBoundConsumerDevices (C4:GetDeviceID (), BindingID))
+	local id, name = next (C4:GetBoundConsumerDevices (C4:GetDeviceID (), BindingID) or {})
+	if (id == nil) then
+		dbg ('No proxy bound to binding ' .. BindingID .. ', nothing to hide')
+		return
+	end
 
-	dbg ('Hiding ' .. name .. ' in all rooms')
+	dbg ('Hiding ' .. tostring (name) .. ' in all rooms')
 
 	-- Send hide command to all rooms, for 'ALL' Navigator groups.
 	for roomId, roomName in pairs (C4:GetDevicesByC4iName ('roomdevice.c4i') or {}) do
@@ -323,7 +327,7 @@ end
 
 --COPY
 function RegisterRooms ()
-	RoomIDs = C4:GetDevicesByC4iName ('roomdevice.c4i')
+	RoomIDs = C4:GetDevicesByC4iName ('roomdevice.c4i') or {}
 	RoomIDSources = {}
 	for roomId, _ in pairs (RoomIDs) do
 		RoomIDSources [roomId] = tonumber (C4:GetDeviceVariable (roomId, 1000)) or 0
