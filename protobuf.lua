@@ -43,6 +43,26 @@ function EncodeTag(ID, WireType)
 	return EncodeVarInt(bit.bor(bit.lshift(ID, 3), bit.band(WireType, 7)))
 end
 
+-- Every message on the remote (6466) and pairing (6467) ports is prefixed with its length as a
+-- protobuf varint. A single raw byte is only correct below 128 bytes (and string.char() raises
+-- an error above 255), so always encode it as a varint.
+function FrameMessage(Payload)
+	return EncodeVarInt(#Payload) .. Payload
+end
+
+-- Reads the varint length prefix at the start of Buffer.
+-- Returns Length, HeaderBytes; nil when the prefix is not complete yet; false when it is invalid.
+function ReadLengthPrefix(Buffer)
+	local Length = 0
+	for i = 1, math.min(#Buffer, 4) do
+		local b = Buffer:byte(i)
+		Length = Length + bit.lshift(bit.band(b, 127), (i - 1) * 7)
+		if (b < 128) then return Length, i end
+	end
+	if (#Buffer >= 4) then return false end -- 4 continuation bytes = 2^28+ bytes, not a real message
+	return nil
+end
+
 function EncodeWire(WireMessage, Level)
 	local Data = ""
 	for k, v in pairs(WireMessage) do

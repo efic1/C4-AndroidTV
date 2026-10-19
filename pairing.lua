@@ -71,8 +71,7 @@ function SendPairingCommandWithSize(Payload)
 	DebugHeader("Sending Pairing Command (" .. #Payload .. "): " .. GetHexString(Payload))
 	local WireMessage = DecodeWire(Payload, 1)
 	local FingerPrint = GetWireMessageFingerPrint(WireMessage)
-	C4:SendToNetwork(6001, 6467, string.char(#Payload));
-	C4:SendToNetwork(6001, 6467, Payload);
+	C4:SendToNetwork(6001, 6467, FrameMessage(Payload))
 	
 	DebugWireMessage(WireMessage)
 end

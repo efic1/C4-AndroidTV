@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p3"
+local DriverVersion = "1.3.2-p4"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
@@ -149,22 +149,46 @@ function OnWatchedVariableChanged(DeviceID, VariableID, strValue)
 	DebugDivider("-")
 	
 	local SwitchedToDeviceID = tonumber(strValue)
-	
-	if(VariableID == 1000) then		
-			if(SwitchedToDeviceID == C4:GetDeviceID() or SwitchedToDeviceID == C4:GetProxyDevices()) then
-				Debug("Switched To Android TV Device, DO NOTHING")
+
+	if(VariableID == 1000) then
+		-- We listen to variable 1000 (selected device) of EVERY room, so this fires for changes
+		-- in rooms that have nothing to do with this TV. Only react when this TV was the selected
+		-- device in the room that changed and something else has been selected now.
+		RoomIDSources = RoomIDSources or {}
+		local RoomID = tonumber(DeviceID)
+		local PreviousDeviceID = RoomIDSources[RoomID] or 0
+		local NewDeviceID = SwitchedToDeviceID or 0
+		RoomIDSources[RoomID] = NewDeviceID
+
+		local Own = GetOwnDeviceIDs()
+		if (Own[NewDeviceID]) then
+			Debug("Switched To Android TV Device, DO NOTHING")
+		elseif (not Own[PreviousDeviceID]) then
+			Debug("Room " .. tostring(RoomID) .. " changed source but Android TV was not selected there, DO NOTHING")
+		else
+			if (Properties["On Room OFF"] == "Pause") then
+				Debug("Switched AWAY from Android TV Device, PAUSE")
+				SendKey(tonumber(Properties["PAUSE_ROOM_OFF Mapping"]))
 			else
-				if (Properties["On Room OFF"] == "Pause") then
-					Debug("Switched AWAY from Android TV Device, PAUSE")
-					SendKey(tonumber(Properties["PAUSE_ROOM_OFF Mapping"]))
-				else
-					Debug("Switched AWAY from Android TV Device, PAUSE NOT ENABLED, DO NOTHING")
-				end
-				
+				Debug("Switched AWAY from Android TV Device, PAUSE NOT ENABLED, DO NOTHING")
 			end
+		end
 	end
-	
-end 
+
+end
+
+-- Device IDs that a room's "selected device" variable holds when this TV is selected:
+-- the driver itself and the proxies bound to it.
+function GetOwnDeviceIDs()
+	local ids = {}
+	local DriverID = C4:GetDeviceID()
+	ids[DriverID] = true
+	for _, Binding in ipairs({5001, 5002}) do
+		local ProxyID = next(C4:GetBoundConsumerDevices(DriverID, Binding) or {})
+		if (ProxyID ~= nil) then ids[ProxyID] = true end
+	end
+	return ids
+end
 
 
 function ReceivedFromProxy(BindingID, strCommand, tParams)
@@ -172,7 +196,7 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 	if (tParams ~= nil) then	Debug(tParams)	end
 	if(Properties["Connection"] == "OFFLINE") then
 			Debug("Connection OFFLINE, Attempting To Connect...")
-			LUA_ACTION.ConnectToCommand(nil)
+			ConnectIfIdle()
 	end
 
 	if (BindingID == SWITCHER_PROXY and strCommand == 'PASSTHROUGH') then
@@ -189,10 +213,9 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 			if (Status == "OFF" or (Status == "?" and not IsConnected())) then
 				if (Properties["Send WOL on ON"] == "True") then
 					SendMagicPacket()
-					WOLRetryCount = 0
-					C4:SetTimer(3000, TryConnectAfterWOL)
+					StartPowerOnSequence(false)
 				elseif (IsConnected()) then
-					SendKey(tonumber(Properties["POWER Mapping"]))
+					StartPowerOnSequence(true)
 				else
 					Debug("TV is OFFLINE and 'Send WOL on ON' is disabled, cannot power on")
 				end
@@ -286,9 +309,13 @@ function HideProxyInAllRooms (BindingID)
 	if (BindingID == 0) then return end -- silently fail if no binding passed in
 
 	-- Get Bound Proxy's Device ID / Name.
-	local id, name = next (C4:GetBoundConsumerDevices (C4:GetDeviceID (), BindingID))
+	local id, name = next (C4:GetBoundConsumerDevices (C4:GetDeviceID (), BindingID) or {})
+	if (id == nil) then
+		dbg ('No proxy bound to binding ' .. BindingID .. ', nothing to hide')
+		return
+	end
 
-	dbg ('Hiding ' .. name .. ' in all rooms')
+	dbg ('Hiding ' .. tostring (name) .. ' in all rooms')
 
 	-- Send hide command to all rooms, for 'ALL' Navigator groups.
 	for roomId, roomName in pairs (C4:GetDevicesByC4iName ('roomdevice.c4i') or {}) do
@@ -299,7 +326,7 @@ end
 
 --COPY
 function RegisterRooms ()
-	RoomIDs = C4:GetDevicesByC4iName ('roomdevice.c4i')
+	RoomIDs = C4:GetDevicesByC4iName ('roomdevice.c4i') or {}
 	RoomIDSources = {}
 	for roomId, _ in pairs (RoomIDs) do
 		RoomIDSources [roomId] = tonumber (C4:GetDeviceVariable (roomId, 1000)) or 0
@@ -485,8 +512,26 @@ RECONNECT_MAX_DELAY = 60	-- seconds
 local ReconnectDelay = RECONNECT_MIN_DELAY
 local ReconnectTimer = nil
 
+CONNECT_MIN_SPACING = 2		-- seconds between connection attempts started by bursty callers
+local LastConnectAttempt = 0
+
+function GetTimeSeconds()
+	return os.time()
+end
+
 function IsConnected()
 	return Properties["Connection"] == "ONLINE"
+end
+
+-- Remote commands arrive in bursts (a held volume button sends many), and each one used to start
+-- a fresh TLS connection attempt while the TV was offline. Skip the attempt if one was just made.
+function ConnectIfIdle()
+	if (GetTimeSeconds() - LastConnectAttempt < CONNECT_MIN_SPACING) then
+		Debug("Connect attempt skipped, one was just made")
+		return false
+	end
+	LUA_ACTION.ConnectToCommand(nil)
+	return true
 end
 
 local function CancelReconnect()
@@ -506,10 +551,21 @@ local function ScheduleReconnect()
 		if (not IsConnected()) then
 			ReconnectDelay = math.min(ReconnectDelay * 2, RECONNECT_MAX_DELAY)
 			Debug("Reconnect attempt...")
-			C4:NetConnect(6001, 6466)
+			ConnectIfIdle()
 			ScheduleReconnect() -- keep trying until OnConnectionStatusChanged reports ONLINE
 		end
 	end)
+end
+
+-- Data arriving on 6466 proves the connection is up, even if its ONLINE status event was missed
+-- or arrived before the OFFLINE event of the previous socket. Without this the property would
+-- stay OFFLINE and every command would be dropped until the next status event.
+function MarkOnlineFromData()
+	if (IsConnected()) then return end
+	Debug("Data received while marked OFFLINE, marking ONLINE")
+	C4:UpdateProperty("Connection", "ONLINE")
+	CancelReconnect()
+	ReconnectDelay = RECONNECT_MIN_DELAY
 end
 
 function OnConnectionStatusChanged(BindingID, nPort, strStatus)
@@ -529,6 +585,7 @@ function OnConnectionStatusChanged(BindingID, nPort, strStatus)
 		-- so they can't corrupt parsing of the next session.
 		MessageBuffer = ""
 		PingRequestCount = 0
+		PowerStatusKnown = false -- the TV re-announces its power state on every new connection
 
 		if (strStatus == "ONLINE") then
 			CancelReconnect()
@@ -543,15 +600,30 @@ function OnConnectionStatusChanged(BindingID, nPort, strStatus)
 end
 
 
+MAX_MESSAGE_SIZE = 65536
+
 function ReceivedFromNetwork(BindingID, nPort, strData)
+	if (strData == nil or #strData == 0) then return end
+	if (nPort == 6466) then MarkOnlineFromData() end
 	MessageBuffer = MessageBuffer .. strData
-	local MessageSize = MessageBuffer:byte(1)
-	
-	if(#MessageBuffer > MessageSize) then -- Check Buffer For Completed Message
-		local Message = MessageBuffer:sub(2, MessageSize+1)
-		ProcessNetworkMessage(Message)
-	
-		MessageBuffer = MessageBuffer:sub(MessageSize+2)
+
+	-- One packet can hold several messages, or only part of one: process every complete message.
+	while (#MessageBuffer > 0) do
+		local Length, HeaderBytes = ReadLengthPrefix(MessageBuffer)
+		if (Length == nil) then break end -- length prefix not complete yet
+		if (Length == false or Length > MAX_MESSAGE_SIZE) then
+			print("Invalid message length prefix, discarding receive buffer")
+			MessageBuffer = ""
+			break
+		end
+		if (#MessageBuffer < HeaderBytes + Length) then break end -- wait for the rest of the message
+
+		local Message = MessageBuffer:sub(HeaderBytes + 1, HeaderBytes + Length)
+		MessageBuffer = MessageBuffer:sub(HeaderBytes + Length + 1)
+
+		-- A malformed message must not abort the loop (and lose the messages behind it).
+		local ok, err = pcall(ProcessNetworkMessage, Message)
+		if (not ok) then print("Error processing network message: " .. tostring(err)) end
 	end
 end
 
@@ -562,26 +634,55 @@ PingTimerID = 0
 
 WOLRetryCount = 0
 MAX_WOL_RETRIES = 15 -- 15 x 3s = up to 45s waiting for the TV to wake and start listening
+MAX_STATUS_WAITS = 5 -- 5 x 1s waiting for the TV to announce its power state after (re)connecting
 
-function TryConnectAfterWOL()
-	if (Properties["Connection"] == "ONLINE") then
-		if (Properties["Power Status"] == "ON") then
-			Debug("TV already reports itself ON after WOL, skipping power key (it's a toggle, not a discrete ON)")
-			WOLRetryCount = 0
+PowerOnTimer = nil			-- pending power-on step; only ONE sequence may run at a time
+PowerOnStatusWaits = 0
+PowerStatusKnown = false	-- true once the TV has reported its power state on the current connection
+
+-- The power key is a toggle, so two overlapping sequences (or a key sent before we know the TV's
+-- real state) can switch a TV that is already on back off. Hence: one sequence at a time, and
+-- the key is only sent once the TV has told us it is off.
+function StartPowerOnSequence(Immediate)
+	if (PowerOnTimer ~= nil) then
+		Debug("Power on already in progress, not starting another sequence")
+		return
+	end
+	WOLRetryCount = 0
+	PowerOnStatusWaits = 0
+	if (Immediate) then
+		TryPowerOn()
+	else
+		PowerOnTimer = C4:SetTimer(3000, TryPowerOn)
+	end
+end
+
+function TryPowerOn()
+	PowerOnTimer = nil
+	if (IsConnected()) then
+		if (not PowerStatusKnown and PowerOnStatusWaits < MAX_STATUS_WAITS) then
+			PowerOnStatusWaits = PowerOnStatusWaits + 1
+			Debug("Connected, waiting for the TV's power status " .. PowerOnStatusWaits .. "/" .. MAX_STATUS_WAITS .. "...")
+			PowerOnTimer = C4:SetTimer(1000, TryPowerOn)
+		elseif (Properties["Power Status"] == "ON") then
+			Debug("TV already reports itself ON, skipping power key (it's a toggle, not a discrete ON)")
 		else
-			Debug("TV came back online after WOL, sending power key")
-			WOLRetryCount = 0
+			if (not PowerStatusKnown) then
+				Debug("TV never reported its power status, sending power key anyway")
+			end
+			Debug("TV is online and OFF, sending power key")
 			SendKey(tonumber(Properties["POWER Mapping"]))
 		end
+	elseif (Properties["Send WOL on ON"] ~= "True") then
+		Debug("TV went offline before power on completed and WOL is disabled, giving up")
 	elseif (WOLRetryCount < MAX_WOL_RETRIES) then
 		WOLRetryCount = WOLRetryCount + 1
 		Debug("Still waiting for TV to wake up after WOL, retry " .. WOLRetryCount .. "/" .. MAX_WOL_RETRIES .. "...")
 		LUA_ACTION.DisconnectFromCommand(nil)
 		LUA_ACTION.ConnectToCommand(nil)
-		C4:SetTimer(3000, TryConnectAfterWOL)
+		PowerOnTimer = C4:SetTimer(3000, TryPowerOn)
 	else
 		Debug("TV never came back online after WOL, giving up")
-		WOLRetryCount = 0
 	end
 end
 
@@ -648,6 +749,7 @@ function ProcessNetworkMessage(Message)
 		
 	elseif(FingerPrint == "[F40][F1][WT0]") then
 		Debug("DEVICE STATUS")
+		PowerStatusKnown = true
 		if(WireMessage[40][1].Value == 1) then
 			C4:UpdateProperty("Power Status", "ON")
 		else
@@ -692,8 +794,7 @@ function SendCommandWithSize(Payload)
 		DebugHeader("Sending Command (" .. #Payload .. ") HEX: " .. GetHexString(Payload))
 		DebugWireMessage(WireMessage)
 	end
-	C4:SendToNetwork(6001, 6466, string.char(#Payload));
-	C4:SendToNetwork(6001, 6466, Payload);
+	C4:SendToNetwork(6001, 6466, FrameMessage(Payload))
 end
 
 
@@ -766,8 +867,12 @@ end
 
 function LUA_ACTION.ConnectToCommand(tQueryParams)
 	Debug("Connecting To Command Interface...")
+	LastConnectAttempt = GetTimeSeconds()
 	C4:NetConnect(6001, 6466)
 	StartPingTimer()
+	-- A failed attempt may not produce an OFFLINE status event, so make sure the backoff retry
+	-- is armed from here too (it is a no-op when already pending or when the driver is unpaired).
+	ScheduleReconnect()
 end
 
 function LUA_ACTION.DisconnectFromCommand(tQueryParams)

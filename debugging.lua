@@ -24,6 +24,12 @@ function Debug(DebugText)
 	end
 end
 
+-- Short alias used by the minidriver helper functions copied from Control4's sample code
+-- (HideProxyInAllRooms); it was never defined, so OnDriverLateInit raised an error.
+function dbg(DebugText)
+	Debug(DebugText)
+end
+
 function DebugWireMessage(WireMessage)
 	if (DebugPrint) then
 		print(PrintWireMessage(WireMessage, 0))
