@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p7"
+local DriverVersion = "1.3.2-p8"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
@@ -191,6 +191,9 @@ function GetOwnDeviceIDs()
 end
 
 
+-- Control4 proxy commands that this driver has no use for. Listed so they don't show up as unknown.
+IGNORED_PROXY_COMMANDS = { SELECT_SOURCE = true, GET_VOLUME_LEVEL = true }
+
 function ReceivedFromProxy(BindingID, strCommand, tParams)
 	DebugHeader("ReceivedFromProxy (" .. BindingID .. "): " .. strCommand)
 	if (tParams ~= nil) then	Debug(tParams)	end
@@ -231,7 +234,9 @@ function ReceivedFromProxy(BindingID, strCommand, tParams)
 			end
 		
 		else
-			if (ProcessInputCommand(strCommand, tParams) == false) then
+			if (IGNORED_PROXY_COMMANDS[strCommand]) then
+				-- sent by the Control4 proxies; nothing to do for this device
+			elseif (ProcessInputCommand(strCommand, tParams) == false) then
 				DebugDivider("!")
 				Debug("COMMAND UNKNOWN: "..strCommand)
 				DebugDivider("!")
@@ -784,7 +789,8 @@ function ProcessNetworkMessage(Message)
 		C4:UpdateProperty("Device Package Name",	WireMessage[1][2][5].Value)
 		C4:UpdateProperty("Device App Version",		WireMessage[1][2][6].Value)
 		SendDriverDescriptorPayload()
-	elseif(FingerPrint == "[F50][F1][WT0][F2][WT0][F3][WT2][F4][WT0]") then
+	elseif(string.sub(FingerPrint, 1, 41) == "[F50][F1][WT0][F2][WT0][F3][WT2][F4][WT0]") then
+		-- newer TVs append more fields ([F5]..[F8], the last one looks like the mute flag), so match the prefix
 		Debug("PLAYER NAME & VOLUME LEVEL")
 		
 	elseif(FingerPrint == "[F40][F1][WT0]") then
