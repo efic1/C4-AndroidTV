@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p3"
+local DriverVersion = "1.3.2-p4"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
