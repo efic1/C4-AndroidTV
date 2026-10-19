@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p5"
+local DriverVersion = "1.3.2-p7"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
@@ -506,11 +506,13 @@ end
 
 
 -- Reconnect with backoff. The 6466 port is configured with auto_connect / keep_connection
--- off in driver.xml, so without this the only recovery path was the 60s ping watchdog.
+-- off in driver.xml, so without this the only recovery path was the ping watchdog.
 RECONNECT_MIN_DELAY = 5		-- seconds
-RECONNECT_MAX_DELAY = 60	-- seconds
+RECONNECT_MAX_DELAY = 20	-- seconds; how long a TV that wakes up waits, at most, to be reconnected
+WATCHDOG_SECONDS = 20		-- the TV pings every few seconds (not measured); no ping in this long = dead link
 local ReconnectDelay = RECONNECT_MIN_DELAY
-local ReconnectTimer = nil
+local ReconnectPending = false
+local ReconnectGeneration = 0
 
 CONNECT_MIN_SPACING = 2		-- seconds between connection attempts started by bursty callers
 local LastConnectAttempt = 0
@@ -555,20 +557,25 @@ function ConnectIfIdle()
 	return true
 end
 
+-- The pending retry is cancelled by invalidating it, not by killing the timer: on the controller
+-- C4:SetTimer returns a timer object, not the numeric ID C4:KillTimer expects, and passing it
+-- raised "idTimer should be a number" in OnConnectionStatusChanged on every ONLINE event. A
+-- cancelled timer still fires, sees a stale generation and does nothing.
 local function CancelReconnect()
-	if (ReconnectTimer ~= nil) then
-		C4:KillTimer(ReconnectTimer)
-		ReconnectTimer = nil
-	end
+	ReconnectGeneration = ReconnectGeneration + 1
+	ReconnectPending = false
 end
 
 local function ScheduleReconnect()
-	if (ReconnectTimer ~= nil) then return end -- already pending
+	if (ReconnectPending) then return end -- already pending
 	if (string.len(Properties["Device Public Key Modulus"]) == 0) then return end -- not paired yet
 
+	ReconnectPending = true
+	local Generation = ReconnectGeneration
 	Debug("Reconnecting in " .. ReconnectDelay .. "s...")
-	ReconnectTimer = C4:SetTimer(ReconnectDelay * 1000, function(timer)
-		ReconnectTimer = nil
+	C4:SetTimer(ReconnectDelay * 1000, function(timer)
+		if (Generation ~= ReconnectGeneration) then return end -- cancelled while waiting
+		ReconnectPending = false
 		if (not IsConnected()) then
 			ReconnectDelay = math.min(ReconnectDelay * 2, RECONNECT_MAX_DELAY)
 			Debug("Reconnect attempt...")
@@ -590,7 +597,13 @@ function MarkOnlineFromData()
 end
 
 function OnConnectionStatusChanged(BindingID, nPort, strStatus)
-	print("Connection Status Changed: " .. strStatus)
+	-- A TV that stays off produces an OFFLINE event for every failed attempt: only print real
+	-- state changes (and everything on the pairing port), the repeats go to the debug log.
+	if (nPort ~= 6466 or strStatus ~= Properties["Connection"]) then
+		print("Connection Status Changed: " .. strStatus)
+	else
+		Debug("Connection Status Changed: " .. strStatus .. " (unchanged)")
+	end
 	if (strStatus == "ONLINE") then
 		if(nPort == 6467) then
 			Pairing_SendRequest()
@@ -710,16 +723,24 @@ function StartPingTimer()
 	if (PingTimerID ~= 0) then
 		PingTimerID = C4:KillTimer(PingTimerID)
 	end
-		PingTimerID = C4:AddTimer(60, "SECONDS", true)
+		PingTimerID = C4:AddTimer(WATCHDOG_SECONDS, "SECONDS", true)
 end
 
+-- Watchdog for a connection that looks ONLINE but has gone silent (TV powered off without closing
+-- the socket). While the driver is offline the backoff retry owns recovery, so the watchdog only
+-- makes sure it is armed instead of resetting a connection attempt that may be mid-handshake.
+-- ConnectToCommand restarts this timer, so a fresh connection always gets a full window.
 function ExecutePingTimer()
 	--Debug("Ping Request Count: " .. PingRequestCount)
-	if(string.len(Properties["Device Public Key Modulus"]) > 0 and PingRequestCount == 0) then
-		Debug("Communication Failed, attempting to connect...")
-		RestartConnection()
+	if(string.len(Properties["Device Public Key Modulus"]) > 0) then
+		if (not IsConnected()) then
+			ScheduleReconnect()
+		elseif (PingRequestCount == 0) then
+			Debug("Communication Failed, no ping from the TV in " .. WATCHDOG_SECONDS .. "s, attempting to connect...")
+			RestartConnection()
+		end
 	end
-	
+
 	PingRequestCount = 0
 end
 
