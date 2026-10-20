@@ -4,7 +4,7 @@ require "helpers"
 require "protobuf"
 require "pairing"
 
-local DriverVersion = "1.3.2-p8"
+local DriverVersion = "1.3.2-p9"
 -- Declared up here so every function below (including OnConnectionStatusChanged) shares
 -- the same upvalue instead of silently writing to a global.
 local MessageBuffer = ""
@@ -197,9 +197,12 @@ IGNORED_PROXY_COMMANDS = { SELECT_SOURCE = true, GET_VOLUME_LEVEL = true }
 function ReceivedFromProxy(BindingID, strCommand, tParams)
 	DebugHeader("ReceivedFromProxy (" .. BindingID .. "): " .. strCommand)
 	if (tParams ~= nil) then	Debug(tParams)	end
-	if(Properties["Connection"] == "OFFLINE") then
+	-- Commands the driver ignores (status polling) must not trigger connection attempts, or they
+	-- would defeat the retry backoff while the TV is in standby.
+	if(Properties["Connection"] == "OFFLINE" and not IGNORED_PROXY_COMMANDS[strCommand]) then
 			Debug("Connection OFFLINE, Attempting To Connect...")
 			ConnectIfIdle()
+			if (strCommand == "ON") then RestartFastRetries() end
 	end
 
 	if (BindingID == SWITCHER_PROXY and strCommand == 'PASSTHROUGH') then
@@ -513,11 +516,14 @@ end
 -- Reconnect with backoff. The 6466 port is configured with auto_connect / keep_connection
 -- off in driver.xml, so without this the only recovery path was the ping watchdog.
 RECONNECT_MIN_DELAY = 5		-- seconds
-RECONNECT_MAX_DELAY = 20	-- seconds; how long a TV that wakes up waits, at most, to be reconnected
+RECONNECT_FAST_CAP = 20		-- seconds; retry cap during the first RECONNECT_FAST_WINDOW seconds offline
+RECONNECT_FAST_WINDOW = 120	-- seconds; a TV that is rebooting or briefly dropped is back well within this
+RECONNECT_MAX_DELAY = 300	-- seconds; after the fast window the retry delay grows up to this (TV in standby)
 WATCHDOG_SECONDS = 20		-- the TV pings every few seconds (not measured); no ping in this long = dead link
 local ReconnectDelay = RECONNECT_MIN_DELAY
 local ReconnectPending = false
 local ReconnectGeneration = 0
+local OfflineSince = nil	-- start of the current outage; the fast retries are counted from here
 
 CONNECT_MIN_SPACING = 2		-- seconds between connection attempts started by bursty callers
 local LastConnectAttempt = 0
@@ -576,13 +582,16 @@ local function ScheduleReconnect()
 	if (string.len(Properties["Device Public Key Modulus"]) == 0) then return end -- not paired yet
 
 	ReconnectPending = true
+	OfflineSince = OfflineSince or GetTimeSeconds()
 	local Generation = ReconnectGeneration
 	Debug("Reconnecting in " .. ReconnectDelay .. "s...")
 	C4:SetTimer(ReconnectDelay * 1000, function(timer)
 		if (Generation ~= ReconnectGeneration) then return end -- cancelled while waiting
 		ReconnectPending = false
 		if (not IsConnected()) then
-			ReconnectDelay = math.min(ReconnectDelay * 2, RECONNECT_MAX_DELAY)
+			local Cap = RECONNECT_MAX_DELAY
+			if (GetTimeSeconds() - OfflineSince < RECONNECT_FAST_WINDOW) then Cap = RECONNECT_FAST_CAP end
+			ReconnectDelay = math.min(ReconnectDelay * 2, Cap)
 			Debug("Reconnect attempt...")
 			ConnectIfIdle()
 			ScheduleReconnect() -- keep trying until OnConnectionStatusChanged reports ONLINE
@@ -593,12 +602,22 @@ end
 -- Data arriving on 6466 proves the connection is up, even if its ONLINE status event was missed
 -- or arrived before the OFFLINE event of the previous socket. Without this the property would
 -- stay OFFLINE and every command would be dropped until the next status event.
+-- Something wants the TV now (a Control4 command, a power on): go back to fast retries for a
+-- while, even if the outage is old and the backoff has grown long.
+function RestartFastRetries()
+	CancelReconnect()
+	ReconnectDelay = RECONNECT_MIN_DELAY
+	OfflineSince = GetTimeSeconds()
+	ScheduleReconnect()
+end
+
 function MarkOnlineFromData()
 	if (IsConnected()) then return end
 	Debug("Data received while marked OFFLINE, marking ONLINE")
 	C4:UpdateProperty("Connection", "ONLINE")
 	CancelReconnect()
 	ReconnectDelay = RECONNECT_MIN_DELAY
+	OfflineSince = nil
 end
 
 function OnConnectionStatusChanged(BindingID, nPort, strStatus)
@@ -629,6 +648,7 @@ function OnConnectionStatusChanged(BindingID, nPort, strStatus)
 		if (strStatus == "ONLINE") then
 			CancelReconnect()
 			ReconnectDelay = RECONNECT_MIN_DELAY
+			OfflineSince = nil
 		else
 			-- No DEVICE STATUS message arrives when the TV vanishes, so "Power Status" would stay
 			-- "ON" forever and the next ON command would be ignored (no WOL, no power key).
